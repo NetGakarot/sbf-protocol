@@ -409,9 +409,9 @@ contract DepositPool {
     /**
      * @notice Emergency withdrawal — returns user's full balance for a token
      * @param token Token to withdraw (address(0) for ETH)
-     * @dev No fees on emergency withdrawal. Discouraged for normal use.
+     * @dev No fees. No token whitelist check — must work even if token is delisted.
      */
-    function emergencyWithdraw(address token) external onlySBTHolder tokenSupported(token) {
+    function emergencyWithdraw(address token) external onlySBTHolder {
         uint256 amount = _balances[msg.sender][token];
         if (amount == 0) revert InsufficientBalance();
 

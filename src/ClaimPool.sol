@@ -179,9 +179,9 @@ contract ClaimPool {
         uint256 totalAmount = 0;
         uint256 processedCount = 0;
 
-        // Pre-calculate total
+        // Pre-calculate total (must match execution loop filter exactly)
         for (uint256 i = 0; i < length;) {
-            if (!processedRedemptions[redemptionHashes[i]] && amounts[i] > 0) {
+            if (!processedRedemptions[redemptionHashes[i]] && amounts[i] > 0 && recipients[i] != address(0)) {
                 totalAmount += amounts[i];
             }
             unchecked { ++i; }
@@ -189,6 +189,7 @@ contract ClaimPool {
         if (redemptionBalance[token] < totalAmount) revert InsufficientBalance();
 
         // Process
+        uint256 actualTotal = 0;
         for (uint256 i = 0; i < length;) {
             if (processedRedemptions[redemptionHashes[i]] || amounts[i] == 0 || recipients[i] == address(0)) {
                 unchecked { ++i; }
@@ -197,6 +198,7 @@ contract ClaimPool {
 
             processedRedemptions[redemptionHashes[i]] = true;
             redemptionBalance[token] -= amounts[i];
+            actualTotal += amounts[i];
             unchecked {
                 ++totalRedemptions;
                 ++processedCount;
@@ -208,8 +210,8 @@ contract ClaimPool {
             unchecked { ++i; }
         }
 
-        totalRedeemed[token] += totalAmount;
-        emit BatchRedeemed(token, processedCount, totalAmount);
+        totalRedeemed[token] += actualTotal;
+        emit BatchRedeemed(token, processedCount, actualTotal);
     }
 
     // ─── Gas Fund Operations ───────────────────────────────────────────
