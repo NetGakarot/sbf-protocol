@@ -1,0 +1,307 @@
+// SPDX-License-Identifier: AGPL-3.0
+pragma solidity ^0.8.19;
+
+/**
+ * @title IERC20 — Minimal interface
+ */
+interface IERC20 {
+    function transfer(address to, uint256 amount) external returns (bool);
+    function balanceOf(address account) external view returns (uint256);
+}
+
+/**
+ * @title ClaimPool
+ * @notice Processes anonymous OTU redemptions across multiple tokens
+ * @dev Operated by backend. Receives (OTU amount + gas fee) from DepositPool.
+ *      Protocol fees go directly to treasury from DepositPool — ClaimPool never touches them.
+ *      Recipient addresses are ephemeral: used only for the redemption tx, never stored.
+ * @custom:security-contact security@soulbound.finance
+ */
+contract ClaimPool {
+    // ─── Access Control ────────────────────────────────────────────────
+
+    address public operator;           // Backend operator (processes redemptions)
+    address public depositPool;        // Only source of inbound funds
+    address public gasManager;         // Can use gas fund for DeFi ops
+    address public constant ETH = address(0);
+
+    // ─── Per-Token Balances ────────────────────────────────────────────
+
+    mapping(address => uint256) public redemptionBalance;  // token => available for redemptions
+    mapping(address => uint256) public gasFundBalance;     // token => gas fund reserve
+
+    // ─── Statistics ────────────────────────────────────────────────────
+
+    uint256 public totalRedemptions;
+    mapping(address => uint256) public totalRedeemed;       // token => total redeemed
+    mapping(address => uint256) public totalGasFeesCollected;
+
+    // Security
+    uint256 public maxBatchSize;
+    mapping(bytes32 => bool) public processedRedemptions;   // Double-spend prevention
+
+    // ─── Events ────────────────────────────────────────────────────────
+
+    event FundsReceived(address indexed token, uint256 otuAmount, uint256 gasFee);
+    event Redeemed(
+        address indexed recipient,
+        address indexed token,
+        uint256 amount,
+        bytes32 indexed redemptionHash,
+        uint256 timestamp
+    );
+    event BatchRedeemed(address indexed token, uint256 count, uint256 totalAmount);
+    event GasFundUsed(address indexed token, address indexed target, uint256 amount, string purpose);
+    event OperatorChanged(address indexed oldOperator, address indexed newOperator);
+    event GasManagerChanged(address indexed oldManager, address indexed newManager);
+    event DepositPoolSet(address indexed depositPool);
+
+    // ─── Errors ────────────────────────────────────────────────────────
+
+    error UnauthorizedAccess();
+    error InvalidAmount();
+    error InsufficientBalance();
+    error TransferFailed();
+    error AlreadyRedeemed();
+    error InvalidAddress();
+    error InvalidArrayLength();
+    error AlreadyConfigured();
+
+    // ─── Modifiers ─────────────────────────────────────────────────────
+
+    modifier onlyOperator() {
+        if (msg.sender != operator) revert UnauthorizedAccess();
+        _;
+    }
+
+    modifier onlyDepositPool() {
+        if (msg.sender != depositPool) revert UnauthorizedAccess();
+        _;
+    }
+
+    modifier onlyGasManager() {
+        if (msg.sender != gasManager) revert UnauthorizedAccess();
+        _;
+    }
+
+    modifier validAddress(address addr) {
+        if (addr == address(0)) revert InvalidAddress();
+        _;
+    }
+
+    // ─── Constructor ───────────────────────────────────────────────────
+
+    constructor() {
+        operator = msg.sender;
+        maxBatchSize = 50;
+        emit OperatorChanged(address(0), msg.sender);
+    }
+
+    // ─── Fund Reception (from DepositPool only) ────────────────────────
+
+    /**
+     * @notice Receive ERC-20 funds from DepositPool with accounting breakdown
+     * @param token ERC-20 token address
+     * @param otuAmount Amount reserved for OTU redemptions
+     * @param gasFee Amount reserved for gas fund
+     * @dev DepositPool transfers tokens first, then calls this to update accounting.
+     *      Protocol fees are sent directly to treasury by DepositPool — never pass through here.
+     */
+    function receiveFunds(address token, uint256 otuAmount, uint256 gasFee) external onlyDepositPool {
+        redemptionBalance[token] += otuAmount;
+        gasFundBalance[token] += gasFee;
+        totalGasFeesCollected[token] += gasFee;
+
+        emit FundsReceived(token, otuAmount, gasFee);
+    }
+
+    /**
+     * @notice Receive native ETH from DepositPool
+     * @dev Called with msg.value = otuAmount + gasFee. DepositPool provides the breakdown.
+     */
+    function receiveFundsETH(uint256 otuAmount, uint256 gasFee) external payable onlyDepositPool {
+        if (msg.value != otuAmount + gasFee) revert InvalidAmount();
+
+        redemptionBalance[ETH] += otuAmount;
+        gasFundBalance[ETH] += gasFee;
+        totalGasFeesCollected[ETH] += gasFee;
+
+        emit FundsReceived(ETH, otuAmount, gasFee);
+    }
+
+    // ─── Redemptions ───────────────────────────────────────────────────
+
+    /**
+     * @notice Process single OTU redemption
+     * @param recipient Address to receive funds (ephemeral — not stored beyond this tx)
+     * @param token Token to redeem
+     * @param amount Amount to transfer
+     * @param redemptionHash Hash of OTU code (idempotency/double-spend prevention)
+     */
+    function processRedemption(
+        address recipient,
+        address token,
+        uint256 amount,
+        bytes32 redemptionHash
+    ) external onlyOperator validAddress(recipient) {
+        if (amount == 0) revert InvalidAmount();
+        if (redemptionBalance[token] < amount) revert InsufficientBalance();
+        if (processedRedemptions[redemptionHash]) revert AlreadyRedeemed();
+
+        // CEI pattern
+        processedRedemptions[redemptionHash] = true;
+        totalRedeemed[token] += amount;
+        unchecked { ++totalRedemptions; }
+        redemptionBalance[token] -= amount;
+
+        _transfer(token, recipient, amount);
+
+        emit Redeemed(recipient, token, amount, redemptionHash, block.timestamp);
+    }
+
+    /**
+     * @notice Process batch redemptions for timing obfuscation
+     * @param recipients Array of recipient addresses
+     * @param token Token to redeem (single token per batch for gas efficiency)
+     * @param amounts Array of amounts
+     * @param redemptionHashes Array of redemption hashes
+     */
+    function batchProcessRedemptions(
+        address[] calldata recipients,
+        address token,
+        uint256[] calldata amounts,
+        bytes32[] calldata redemptionHashes
+    ) external onlyOperator {
+        uint256 length = recipients.length;
+        if (length == 0 || length > maxBatchSize) revert InvalidArrayLength();
+        if (length != amounts.length || length != redemptionHashes.length) revert InvalidArrayLength();
+
+        uint256 totalAmount = 0;
+        uint256 processedCount = 0;
+
+        // Pre-calculate total
+        for (uint256 i = 0; i < length;) {
+            if (!processedRedemptions[redemptionHashes[i]] && amounts[i] > 0) {
+                totalAmount += amounts[i];
+            }
+            unchecked { ++i; }
+        }
+        if (redemptionBalance[token] < totalAmount) revert InsufficientBalance();
+
+        // Process
+        for (uint256 i = 0; i < length;) {
+            if (processedRedemptions[redemptionHashes[i]] || amounts[i] == 0 || recipients[i] == address(0)) {
+                unchecked { ++i; }
+                continue;
+            }
+
+            processedRedemptions[redemptionHashes[i]] = true;
+            redemptionBalance[token] -= amounts[i];
+            unchecked {
+                ++totalRedemptions;
+                ++processedCount;
+            }
+
+            _transfer(token, recipients[i], amounts[i]);
+
+            emit Redeemed(recipients[i], token, amounts[i], redemptionHashes[i], block.timestamp);
+            unchecked { ++i; }
+        }
+
+        totalRedeemed[token] += totalAmount;
+        emit BatchRedeemed(token, processedCount, totalAmount);
+    }
+
+    // ─── Gas Fund Operations ───────────────────────────────────────────
+
+    /**
+     * @notice Use gas fund for DeFi operations (AAVE yield, etc.)
+     * @param token Token to use from gas fund
+     * @param amount Amount to use
+     * @param target Target contract
+     * @param data Call data
+     * @param purpose Description for audit trail
+     */
+    function useGasFund(
+        address token,
+        uint256 amount,
+        address target,
+        bytes calldata data,
+        string calldata purpose
+    ) external onlyGasManager validAddress(target) {
+        if (amount == 0) revert InvalidAmount();
+        if (gasFundBalance[token] < amount) revert InsufficientBalance();
+
+        gasFundBalance[token] -= amount;
+
+        if (token == ETH) {
+            (bool success,) = target.call{value: amount}(data);
+            if (!success) revert TransferFailed();
+        } else {
+            // For ERC-20 gas fund operations, transfer tokens then call
+            bool success = IERC20(token).transfer(target, amount);
+            if (!success) revert TransferFailed();
+            if (data.length > 0) {
+                (bool callSuccess,) = target.call(data);
+                if (!callSuccess) revert TransferFailed();
+            }
+        }
+
+        emit GasFundUsed(token, target, amount, purpose);
+    }
+
+    // ─── Internal ──────────────────────────────────────────────────────
+
+    function _transfer(address token, address to, uint256 amount) internal {
+        if (token == ETH) {
+            (bool success,) = to.call{value: amount}("");
+            if (!success) revert TransferFailed();
+        } else {
+            bool success = IERC20(token).transfer(to, amount);
+            if (!success) revert TransferFailed();
+        }
+    }
+
+    // ─── Admin ─────────────────────────────────────────────────────────
+
+    function setDepositPool(address _depositPool) external onlyOperator validAddress(_depositPool) {
+        if (depositPool != address(0)) revert AlreadyConfigured();
+        depositPool = _depositPool;
+        emit DepositPoolSet(_depositPool);
+    }
+
+    function setGasManager(address _gasManager) external onlyOperator validAddress(_gasManager) {
+        address old = gasManager;
+        gasManager = _gasManager;
+        emit GasManagerChanged(old, _gasManager);
+    }
+
+    function changeOperator(address newOperator) external onlyOperator validAddress(newOperator) {
+        address old = operator;
+        operator = newOperator;
+        emit OperatorChanged(old, newOperator);
+    }
+
+    // ─── View Functions ────────────────────────────────────────────────
+
+    function getPoolStats(address token) external view returns (
+        uint256 totalBalance,
+        uint256 redemptionBal,
+        uint256 gasFundBal,
+        uint256 gasFeesCollected
+    ) {
+        uint256 balance = token == ETH
+            ? address(this).balance
+            : IERC20(token).balanceOf(address(this));
+        return (balance, redemptionBalance[token], gasFundBalance[token], totalGasFeesCollected[token]);
+    }
+
+    function isRedeemed(bytes32 redemptionHash) external view returns (bool) {
+        return processedRedemptions[redemptionHash];
+    }
+
+    // Accept ETH (only from DepositPool via receiveFundsETH)
+    receive() external payable {
+        if (msg.sender != depositPool) revert UnauthorizedAccess();
+    }
+}
