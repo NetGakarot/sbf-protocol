@@ -1,21 +1,25 @@
 # SBF Protocol
 
-Privacy-preserving payment protocol. On-chain primitive for anonymous, cash-like digital asset transfers with regulatory compatibility.
+Compliant private payments on-chain. An open-source primitive for anonymous, cash-like digital asset transfers that preserves regulatory compatibility by design.
 
 Built by [Soulbound Security](https://soulboundsecurity.io).
 
 ## Overview
 
-SBF Protocol enables privacy-preserving transfers through a deposit/claim pool architecture gated by non-transferable Soulbound Tokens (SBTs). Users deposit supported tokens, generate One-Time-Use (OTU) withdrawal codes off-chain, and recipients redeem anonymously — no on-chain link between depositor and redeemer.
+Soulbound Finance enables compliant private payments by separating identity from redemption. Depositors are identity-linked via non-transferable [Soulbound Tokens](#soulboundtoken) and ZKP commitments. Recipients redeem anonymously via One-Time-Use (OTU) bearer codes — no on-chain link between depositor and redeemer.
+
+This is not a mixer. Deposits are identity-gated (SBT + optional Privado ID ZKP), and each OTU generation requires a per-transaction [EIP-712 signed attestation](#eip-712-fee-attestation) of purpose recorded immutably on-chain. Compliance is structurally embedded, not bolted on.
 
 **Core properties:**
 
-- **Minimum Attributability** — KYC verification at deposit via ZKP commitment, anonymous redemption via OTU bearer instruments
-- **Per-Transaction Fee Attestation** — EIP-712 signed attestation of purpose (charitable/commercial) per OTU, not per user. Immutable on-chain record. Game theory over admin approval.
-- **Multi-Token** — USDC, USDT, WBTC, ETH at launch. Token whitelist controlled by multisig.
-- **Stateless Redemption** — Recipient addresses are ephemeral. No recipient data stored on-chain or off-chain beyond the redemption transaction itself.
+- **Compliant by Design** — KYC-linkable deposits via ZKP commitment (Privado ID). EULA acceptance cryptographically recorded at mint. Per-transaction purpose attestation on every OTU. Regulators have an audit surface; counterparties do not.
+- **Private Redemption** — Recipient addresses are ephemeral. No recipient data stored on-chain or off-chain beyond the redemption transaction itself.
+- **Multi-Token** — USDC, USDT, WBTC, ETH at [launch](docs/PROTOCOL_SPEC.md#supported-tokens). Token whitelist controlled by multisig.
+- **Immutable Contracts** — No proxies, no `delegatecall`. [Upgrades](docs/PROTOCOL_SPEC.md#8-upgrade-path) require explicit user migration. Auditable by construction.
 
 ## Architecture
+
+See [§1 System Overview](docs/PROTOCOL_SPEC.md#1-system-overview) for the full contract dependency graph.
 
 ```
 ┌──────────────────────┐
@@ -32,25 +36,40 @@ SBF Protocol enables privacy-preserving transfers through a deposit/claim pool a
            │
 ┌──────────▼───────────┐
 │   ClaimPool          │  Outflow. Operator-processed redemptions.
-│                      │  Batch processing for timing obfuscation.
-│                      │  Gas fund for future DeFi operations.
+│                      │  Batch processing. Gas fund for DeFi operations.
 └──────────────────────┘
 
 Deployment: SoulBoundDeployer — atomic deploy + link in single tx.
 ```
 
+### SoulBoundToken
+
+One SBT per address. Non-transferable, non-burnable. Holds the user's `encryptedAccountId`, `zkpCommitment` (Privado ID), and EULA acceptance hash. The nonce field increments on each OTU generation and serves as replay protection for EIP-712 attestations.
+
+ZKP commitments can be set post-mint — mint first, verify later. See [§2 SoulBoundToken](docs/PROTOCOL_SPEC.md#2-soulboundtoken).
+
+### DepositPool
+
+Accepts ETH and whitelisted ERC-20s from SBT holders. No fees on deposit. OTU generation deducts the face value plus protocol and gas fees from the user's internal balance, sends the protocol fee directly to the treasury, and forwards the remainder to ClaimPool. The contract has zero knowledge of the OTU code itself.
+
+See [§3 DepositPool](docs/PROTOCOL_SPEC.md#3-depositpool) and [§4 EIP-712 Fee Attestation](docs/PROTOCOL_SPEC.md#4-eip-712-fee-attestation).
+
+### ClaimPool
+
+Holds redemption funds and the gas reserve. Redemptions are processed by a privileged operator role — the bridge between off-chain OTU validation and on-chain fund release. Supports single and [batch redemptions](docs/PROTOCOL_SPEC.md#batch-redemption). The gas fund is a separate balance intended for AAVE yield deployment and protocol operations.
+
+See [§5 ClaimPool](docs/PROTOCOL_SPEC.md#5-claimpool) and [§7 Operator Trust Model](docs/PROTOCOL_SPEC.md#7-operator-trust-model).
+
 ## Fee Model
 
-Fees are charged **on top** of the OTU face value, not deducted from it.
+Fees are charged **on top** of the OTU face value, not deducted from it. See [§3 Fee Structure](docs/PROTOCOL_SPEC.md#fee-structure).
 
 | Tier | Protocol Fee | Gas Fee | Total | Status |
 |------|-------------|---------|-------|--------|
 | Charitable / Donation / Gift | 1.00% | 0.25% | 1.25% | Active |
 | Commercial / Enterprise | 2.00% | 0.25% | 2.25% | Disabled at launch |
 
-Fee tier is selected **per transaction** via EIP-712 signed attestation. The user cryptographically attests to the purpose of each OTU on an immutable ledger. No admin approval. No oracle. Pure game theory — individuals self-select freely; businesses will never sign a false charitable attestation on-chain.
-
-Gas fee (0.25%) is immutable. Protocol fees are adjustable by controller multisig, capped at 5%.
+Fee tier is selected per transaction via EIP-712 signed attestation. The user cryptographically attests to the purpose of each OTU, creating an immutable on-chain record. Gas fee (0.25%) is immutable. Protocol fees are adjustable by controller multisig, capped at 5%.
 
 ## Repository Structure
 
