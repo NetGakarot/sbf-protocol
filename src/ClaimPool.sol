@@ -2,9 +2,10 @@
 pragma solidity ^0.8.19;
 
 /**
- * @title IERC20 — Minimal interface
+ * @title IERC20Send — Minimal send-only interface (no transferFrom)
+ * @dev ClaimPool only sends tokens out. It never pulls from users.
  */
-interface IERC20 {
+interface IERC20Send {
     function transfer(address to, uint256 amount) external returns (bool);
     function balanceOf(address account) external view returns (uint256);
 }
@@ -256,7 +257,7 @@ contract ClaimPool {
             if (!success) revert TransferFailed();
         } else {
             // For ERC-20 gas fund operations, transfer tokens then call
-            bool success = IERC20(token).transfer(target, amount);
+            bool success = IERC20Send(token).transfer(target, amount);
             if (!success) revert TransferFailed();
             if (data.length > 0) {
                 (bool callSuccess,) = target.call(data);
@@ -274,7 +275,7 @@ contract ClaimPool {
             (bool success,) = to.call{value: amount}("");
             if (!success) revert TransferFailed();
         } else {
-            bool success = IERC20(token).transfer(to, amount);
+            bool success = IERC20Send(token).transfer(to, amount);
             if (!success) revert TransferFailed();
         }
     }
@@ -309,7 +310,7 @@ contract ClaimPool {
     ) {
         uint256 balance = token == ETH
             ? address(this).balance
-            : IERC20(token).balanceOf(address(this));
+            : IERC20Send(token).balanceOf(address(this));
         return (balance, redemptionBalance[token], gasFundBalance[token], totalGasFeesCollected[token]);
     }
 
