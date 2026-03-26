@@ -52,6 +52,7 @@ contract ClaimPool {
     );
     event BatchRedeemed(address indexed token, uint256 count, uint256 totalAmount);
     event GasFundUsed(address indexed token, address indexed target, uint256 amount, string purpose);
+    event GasFundDeposited(address indexed from, uint256 amount);
     event OperatorChanged(address indexed oldOperator, address indexed newOperator);
     event GasManagerChanged(address indexed oldManager, address indexed newManager);
     event DepositPoolSet(address indexed depositPool);
@@ -217,6 +218,20 @@ contract ClaimPool {
     // ─── Gas Fund Operations ───────────────────────────────────────────
 
     /**
+     * @notice Deposit ETH into gas fund — for swap proceeds or direct top-ups
+     * @dev Enables the full swap cycle: gasManager pulls ERC-20 via useGasFund,
+     *      swaps to ETH externally (e.g. Uniswap), deposits ETH back here.
+     *      Also serves as emergency top-up if gas fund runs low.
+     */
+    function depositGasFundETH() external payable onlyGasManager {
+        if (msg.value == 0) revert InvalidAmount();
+
+        gasFundBalance[ETH] += msg.value;
+
+        emit GasFundDeposited(msg.sender, msg.value);
+    }
+
+    /**
      * @notice Use gas fund for DeFi operations (AAVE yield, etc.)
      * @param token Token to use from gas fund
      * @param amount Amount to use
@@ -302,8 +317,13 @@ contract ClaimPool {
         return processedRedemptions[redemptionHash];
     }
 
-    // Accept ETH (only from DepositPool via receiveFundsETH)
+    // Accept ETH from DepositPool (fund reception) or gasManager (swap proceeds / top-ups)
     receive() external payable {
+        if (msg.sender == gasManager) {
+            gasFundBalance[ETH] += msg.value;
+            emit GasFundDeposited(msg.sender, msg.value);
+            return;
+        }
         if (msg.sender != depositPool) revert UnauthorizedAccess();
     }
 }
