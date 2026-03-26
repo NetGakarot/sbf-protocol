@@ -40,6 +40,7 @@ contract SoulBoundDeployer {
     error InvalidAddress();
     error DeploymentFailed();
     error LinkingFailed();
+    error HandoffFailed();
     error AlreadyDeployed();
 
     constructor() {
@@ -78,27 +79,23 @@ contract SoulBoundDeployer {
         gasManager = _gasManager;
         deployedAt = block.timestamp;
 
-        // Deploy in dependency order — controller = msg.sender for all
-        SoulBoundToken sbt = new SoulBoundToken(msg.sender);
+        SoulBoundToken sbt = new SoulBoundToken(address(this));
         if (address(sbt) == address(0)) revert DeploymentFailed();
 
-        DepositPool deposit = new DepositPool(address(sbt), msg.sender);
+        DepositPool deposit = new DepositPool(address(sbt), address(this));
         if (address(deposit) == address(0)) revert DeploymentFailed();
 
         ClaimPool claim = new ClaimPool();
         if (address(claim) == address(0)) revert DeploymentFailed();
 
-        // Store addresses
         sbtContract = address(sbt);
         depositPool = address(deposit);
         claimPool = payable(address(claim));
 
-        // Link contracts
         if (!_linkContracts(sbt, deposit, claim, _protocolTreasury, _gasManager, _eulaHash)) {
             revert LinkingFailed();
         }
 
-        // Whitelist tokens on DepositPool
         for (uint256 i = 0; i < _tokens.length;) {
             if (_tokens[i] != address(0)) {
                 deposit.addToken(_tokens[i]);
@@ -106,8 +103,9 @@ contract SoulBoundDeployer {
             unchecked { ++i; }
         }
 
-        // Transfer ClaimPool operator to deployer EOA (for backend redemption calls)
-        claim.changeOperator(msg.sender);
+        if (!_handoffRoles(sbt, deposit, claim, msg.sender)) {
+            revert HandoffFailed();
+        }
 
         emit SystemDeployed(
             sbtContract,
@@ -143,6 +141,19 @@ contract SoulBoundDeployer {
         // ClaimPool configuration
         try claim.setDepositPool(address(deposit)) {} catch { return false; }
         try claim.setGasManager(_gasManager) {} catch { return false; }
+
+        return true;
+    }
+
+    function _handoffRoles(
+        SoulBoundToken sbt,
+        DepositPool deposit,
+        ClaimPool claim,
+        address newOwner
+    ) internal returns (bool) {
+        try sbt.transferController(newOwner) {} catch { return false; }
+        try deposit.transferController(newOwner) {} catch { return false; }
+        try claim.changeOperator(newOwner) {} catch { return false; }
 
         return true;
     }
