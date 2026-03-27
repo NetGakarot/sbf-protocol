@@ -121,11 +121,16 @@ Target chain: **Arbitrum One** (mainnet) / **Arbitrum Sepolia** (testnet).
 forge script scripts/Deploy.s.sol --rpc-url $RPC_URL --broadcast
 ```
 
+## Testing
+
+See [TESTING.md](TESTING.md) for full test coverage documentation and
+contribution guidelines.
+
 ## Security
 
 This protocol has not yet been audited. Use at your own risk.
 
-To report a vulnerability: **info@soulboundsecurity.io**
+To report a vulnerability: **security@soulboundsecurity.io**
 
 ## Links
 
