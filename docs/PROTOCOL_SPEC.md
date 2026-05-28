@@ -44,9 +44,10 @@ Non-transferable identity token. One per address. Cannot be burned or transferre
 ### Mint Flow
 
 1. Controller sets `currentEulaHash` on the contract.
-2. User calls `mintSBT(encryptedAccountId, zkpCommitment, eulaHash)`.
-3. Contract verifies: no existing SBT for caller, valid account ID, EULA hash matches current.
-4. SBT is created. The transaction signature constitutes cryptographic EULA acceptance.
+2. User calls `mintSBT(zkpCommitment, eulaHash)`.
+3. Contract verifies: no existing SBT for caller, EULA hash matches current.
+4. Contract internally derives `encryptedAccountId` deterministically from `msg.sender` and `chainId` to enforce canonical identity derivation.
+5. SBT is created. The transaction signature constitutes cryptographic EULA acceptance.
 
 ### ZKP Commitment
 
