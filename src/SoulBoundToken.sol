@@ -92,21 +92,22 @@ contract SoulBoundToken is ISoulBoundToken {
 
     /**
      * @notice Mint SBT with EULA acceptance gate
-     * @param _encryptedAccountId Hashed account identifier
      * @param _zkpCommitment Privado ID ZKP commitment (can be bytes32(0) if not yet verified)
      * @param _eulaHash Must match currentEulaHash — the transaction signature IS the acceptance
+     * @dev _encryptedAccountId is the canonical identity derivation on-chain
      * @dev The act of calling this function with the correct EULA hash, signed by the user's
      *      wallet, constitutes cryptographic proof of EULA acceptance on an immutable ledger.
      */
     function mintSBT(
-        bytes32 _encryptedAccountId,
         bytes32 _zkpCommitment,
         bytes32 _eulaHash
     ) external {
         if (_sbtRegistry[msg.sender].exists) revert SBTAlreadyExists();
-        if (_encryptedAccountId == bytes32(0)) revert InvalidAccountId();
         if (currentEulaHash == bytes32(0)) revert EulaNotSet();
         if (_eulaHash != currentEulaHash) revert EulaMismatch();
+
+        bytes32 _encryptedAccountId = keccak256(abi.encodePacked(msg.sender, "SBF_ALPHA_V1", block.chainid));
+        
 
         _sbtRegistry[msg.sender] = SBTData({
             encryptedAccountId: _encryptedAccountId,
